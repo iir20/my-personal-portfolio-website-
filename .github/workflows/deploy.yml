@@ -30,4 +30,8 @@ jobs:
 
       - name: Build and Scan Docker Image
         run: |
-          docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/ratul-cyber-deck:latest .
+          GCP_PROJECT="${{ secrets.GCP_PROJECT_ID }}"
+          if [ -z "$GCP_PROJECT" ]; then
+            GCP_PROJECT="ismail-ibne-ratul"
+          fi
+          docker build -t gcr.io/$GCP_PROJECT/ratul-cyber-deck:latest .
