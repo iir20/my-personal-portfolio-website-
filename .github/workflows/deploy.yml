@@ -1,14 +1,17 @@
-name: CI/CD Production Build & Self-Host Deploy
+name: CI/CD Production Build & GitHub Pages Deploy
 on:
   push:
     branches: [ "master", "main" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-and-pack:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code Node
+      - name: Checkout Repository Node
         uses: actions/checkout@v4
 
       - name: Align Node Runtime Version
@@ -25,13 +28,28 @@ jobs:
         env:
           NODE_ENV: production
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and Scan Docker Image
+      - name: Generate Dynamic Sitemap & SEO Registry
         run: |
-          GCP_PROJECT="${{ secrets.GCP_PROJECT_ID }}"
-          if [ -z "$GCP_PROJECT" ]; then
-            GCP_PROJECT="ismail-ibne-ratul"
-          fi
-          docker build -t gcr.io/$GCP_PROJECT/ratul-cyber-deck:latest .
+          mkdir -p ./dist
+          echo '<?xml version="1.0" encoding="UTF-8"?>' > ./dist/sitemap.xml
+          echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' >> ./dist/sitemap.xml
+          echo '  <url>' >> ./dist/sitemap.xml
+          echo '    <loc>https://iir20.github.io/</loc>' >> ./dist/sitemap.xml
+          echo '    <lastmod>'$(date +%Y-%m-%d)'</lastmod>' >> ./dist/sitemap.xml
+          echo '    <changefreq>weekly</changefreq>' >> ./dist/sitemap.xml
+          echo '    <priority>1.0</priority>' >> ./dist/sitemap.xml
+          echo '  </url>' >> ./dist/sitemap.xml
+          echo '  <url>' >> ./dist/sitemap.xml
+          echo '    <loc>https://iir20.github.io/admin-deck</loc>' >> ./dist/sitemap.xml
+          echo '    <lastmod>'$(date +%Y-%m-%d)'</lastmod>' >> ./dist/sitemap.xml
+          echo '    <changefreq>monthly</changefreq>' >> ./dist/sitemap.xml
+          echo '    <priority>0.5</priority>' >> ./dist/sitemap.xml
+          echo '  </url>' >> ./dist/sitemap.xml
+          echo '</urlset>' >> ./dist/sitemap.xml
+          echo "✅ Sitemap.xml generated successfully inside production bundle!"
+
+      - name: Deploy static assets to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist

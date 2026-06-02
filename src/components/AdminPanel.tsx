@@ -2,15 +2,13 @@ import React, { useState, useEffect } from "react";
 import { 
   Lock, AlertTriangle, ShieldCheck, Database, RefreshCw, Trash2, 
   Plus, Edit3, Save, CheckCircle, Clock, Undo, Eye, User, FileText, Globe, Flame,
-  UploadCloud, FileCode, Terminal, Download, Activity, ShieldAlert
+  UploadCloud, FileCode, Terminal, Download, Activity, ShieldAlert, Github
 } from "lucide-react";
 import { 
   db, 
   handleFirestoreError, 
   OperationType,
-  storage
-} from "../lib/firebase";
-import { 
+  storage,
   doc, 
   getDoc, 
   setDoc, 
@@ -20,8 +18,12 @@ import {
   addDoc, 
   writeBatch,
   query,
-  orderBy
-} from "firebase/firestore";
+  orderBy,
+  clientSideAdminAuth,
+  isSessionValid,
+  logoutAdmin,
+  sha256
+} from "../lib/firebase";
 
 interface AdminPanelProps {
   accentColor: "green" | "cyan" | "purple" | "amber";
@@ -72,6 +74,23 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
   const [snapshots, setSnapshots] = useState<any[]>([]);
   const [activityLogs, setActivityLogs] = useState<any[]>([]);
 
+  // GitHub Cloud Sync States
+  const [ghToken, setGhToken] = useState(() => localStorage.getItem("ratul_gh_token") || "");
+  const [ghRepo, setGhRepo] = useState(() => localStorage.getItem("ratul_gh_repo") || "iir20/ratul-cyber-deck");
+  const [ghBranch, setGhBranch] = useState(() => localStorage.getItem("ratul_gh_branch") || "main");
+
+  useEffect(() => {
+    localStorage.setItem("ratul_gh_token", ghToken);
+  }, [ghToken]);
+
+  useEffect(() => {
+    localStorage.setItem("ratul_gh_repo", ghRepo);
+  }, [ghRepo]);
+
+  useEffect(() => {
+    localStorage.setItem("ratul_gh_branch", ghBranch);
+  }, [ghBranch]);
+
   // Telemetry Metrics
   const [visitorCount, setVisitorCount] = useState(1337);
   const [malwareBlocks, setMalwareBlocks] = useState(242);
@@ -92,6 +111,17 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
       return () => clearTimeout(timer);
     }
   }, [lockoutTimeLeft]);
+
+  // Restore session token if valid
+  useEffect(() => {
+    const restoreSession = async () => {
+      const valid = await isSessionValid();
+      if (valid) {
+        setIsAuthenticated(true);
+      }
+    };
+    restoreSession();
+  }, []);
 
   // Load CMS Data on Authentication
   useEffect(() => {
@@ -124,15 +154,9 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
     setAuthError("");
 
     try {
-      const response = await fetch("/api/admin/auth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password })
-      });
+      const data = await clientSideAdminAuth(password);
 
-      const data = await response.json();
-
-      if (response.ok && data.success) {
+      if (data.success) {
         setIsAuthenticated(true);
         setFailedAttempts(0);
       } else {
@@ -150,7 +174,7 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
         }
       }
     } catch (err) {
-      setAuthError("Network packet collision or timed out.");
+      setAuthError("Handshake logic crashed. Check console protocols.");
     } finally {
       setIsLoading(false);
     }
@@ -506,6 +530,156 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
       setTimeout(() => setSaveStatus(null), 3000);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, "batch-restore");
+    }
+  };
+
+  // GitHub Backup Synchronizer Push CMS to GitHub contents
+  const handlePushToGitHub = async () => {
+    if (!ghToken || !ghRepo) {
+      alert("Please establish proper GitHub Personal Access Token (PAT) and repository endpoints first.");
+      return;
+    }
+    setSaveStatus("PUSHING TO GITHUB...");
+    try {
+      const headers = {
+        Authorization: `token ${ghToken}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+      };
+
+      const fullCMSState = {
+        heroConfig,
+        projects,
+        skills,
+        activeCV,
+        cvVersions,
+        timestamp: new Date().toISOString()
+      };
+
+      const contentBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(fullCMSState, null, 2))));
+      
+      let fileSha = "";
+      const path = "portfolio-data/cms-backup.json";
+      const getRes = await fetch(`https://api.github.com/repos/${ghRepo}/contents/${path}?ref=${ghBranch}`, { headers });
+      if (getRes.ok) {
+        const existingFile = await getRes.json();
+        fileSha = existingFile.sha;
+      }
+
+      const putBody: any = {
+        message: "Sync CMS database backup snapshot [Serverless Admin]",
+        content: contentBase64,
+        branch: ghBranch
+      };
+      if (fileSha) {
+        putBody.sha = fileSha;
+      }
+
+      const putRes = await fetch(`https://api.github.com/repos/${ghRepo}/contents/${path}`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(putBody)
+      });
+
+      if (putRes.ok) {
+        setSaveStatus("GITHUB SYNC OK");
+        logActivity("GitHub Backup Push", "SUCCESS", `Synchronized CMS portfolio settings payload to repository ${ghRepo}`);
+        alert(`SUCCESS: CMS metadata backup snapshot synced and committed successfully into repository branch: ${ghBranch}!`);
+      } else {
+        const errData = await putRes.json();
+        throw new Error(errData.message || "GitHub API write blocked");
+      }
+    } catch (err: any) {
+      alert("GitHub Synchronizer collapsed: " + err.message);
+      logActivity("GitHub Sync Fail", "CRITICAL", err.message);
+    } finally {
+      setTimeout(() => setSaveStatus(null), 3000);
+    }
+  };
+
+  // GitHub Backup Synchronizer Pull CMS from GitHub contents
+  const handlePullFromGitHub = async () => {
+    if (!ghToken || !ghRepo) {
+      alert("Please establish proper GitHub Personal Access Token (PAT) and repository endpoints first.");
+      return;
+    }
+    if (!confirm("WARNING: Pulling from GitHub will overwrite all currently saved portfolio contents in your local IndexedDB. Proceed?")) return;
+    setSaveStatus("PULLING FROM GITHUB...");
+    try {
+      const headers = {
+        Authorization: `token ${ghToken}`,
+        Accept: "application/vnd.github.v3+json"
+      };
+
+      const path = "portfolio-data/cms-backup.json";
+      const res = await fetch(`https://api.github.com/repos/${ghRepo}/contents/${path}?ref=${ghBranch}`, { headers });
+      if (res.ok) {
+        const data = await res.json();
+        const decoded = decodeURIComponent(escape(atob(data.content.replace(/\s/g, ""))));
+        const parsed = JSON.parse(decoded);
+
+        if (parsed.heroConfig) {
+          setHeroConfig(parsed.heroConfig);
+          await setDoc(doc(db, "portfolio", "config"), {
+            heroName: parsed.heroConfig.heroName,
+            heroTitle: parsed.heroConfig.heroTitle,
+            heroBio: parsed.heroConfig.heroBio,
+            skills: parsed.heroConfig.typingTags.split(",").map((t: string) => t.trim()),
+            themeColor: accentColor,
+            animationsActive: true
+          });
+        }
+
+        if (parsed.projects) {
+          const batch = writeBatch(db);
+          projects.forEach(p => {
+            if (p.firestoreId) {
+              batch.delete(doc(db, "projects", p.firestoreId));
+            }
+          });
+          parsed.projects.forEach((p: any) => {
+            const newRef = doc(collection(db, "projects"));
+            batch.set(newRef, p);
+          });
+          await batch.commit();
+          setProjects(parsed.projects);
+        }
+
+        if (parsed.skills) {
+          const batch = writeBatch(db);
+          skills.forEach(s => {
+            if (s.firestoreId) {
+              batch.delete(doc(db, "skills", s.firestoreId));
+            }
+          });
+          parsed.skills.forEach((s: any) => {
+            const newRef = doc(collection(db, "skills"));
+            batch.set(newRef, s);
+          });
+          await batch.commit();
+          setSkills(parsed.skills);
+        }
+
+        if (parsed.activeCV) {
+          setActiveCV(parsed.activeCV);
+          setCvVersions(parsed.cvVersions || []);
+          await setDoc(doc(db, "portfolio", "cv"), {
+            ...parsed.activeCV,
+            versionsHistory: parsed.cvVersions || []
+          });
+        }
+
+        setSaveStatus("RESTORED OK");
+        logActivity("GitHub Pull Restore", "SUCCESS", `Successfully pulled and overwritten local database state from ${ghRepo}`);
+        alert("SUCCESS: Fully restored local workspace IndexedDB structure from GitHub repository backup snapshot!");
+      } else {
+        throw new Error("Could not find cms-backup.json in your repository at path: /portfolio-data/cms-backup.json");
+      }
+    } catch (err: any) {
+      alert("GitHub Synchronizer collapsed: " + err.message);
+      logActivity("GitHub Sync Fail", "CRITICAL", err.message);
+    } finally {
+      setTimeout(() => setSaveStatus(null), 3000);
     }
   };
 
@@ -1148,6 +1322,72 @@ export default function AdminPanel({ accentColor, onBackToApp }: AdminPanelProps
                 <div className="text-center py-6 text-[10px] text-stone-600 font-bold uppercase animate-pulse select-none">No rollback images committed inside active nodes backups matrix.</div>
               )}
             </div>
+
+            {/* GITHUB DATA BACKUP SYNC SECTION */}
+            <div className="pt-5 border-t border-stone-900 mt-6 space-y-4">
+              <div className="flex items-center gap-2 select-none">
+                <Github className="h-4 w-4 text-emerald-400" />
+                <h4 className="text-[10px] font-extrabold text-white uppercase tracking-wider">GITHUB DATA HARBOR / DEPLOYMENT SNAPSHOT SYNCER</h4>
+              </div>
+              <p className="text-[9px] text-[#8e8e93] uppercase leading-relaxed max-w-2xl select-none font-mono">
+                Adheres to Serverless Zero-Backend layout specs. Push, download, and synchronize your entire local IndexedDB state directly key-for-key with dynamic JSON storage files on your repository branch via GitHub API.
+              </p>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="space-y-1">
+                  <label className="text-[8px] text-zinc-500 uppercase tracking-wider block font-mono">GITHUB PERSONAL ACCESS TOKEN (PAT)</label>
+                  <input
+                    type="password"
+                    value={ghToken}
+                    onChange={(e) => setGhToken(e.target.value)}
+                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxx"
+                    className="w-full text-[9px] bg-[#040406] border border-stone-800 rounded-sm p-2 text-white font-mono focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[8px] text-zinc-500 uppercase tracking-wider block font-mono">TARGET SOURCE REPOSITORY</label>
+                  <input
+                    type="text"
+                    value={ghRepo}
+                    onChange={(e) => setGhRepo(e.target.value)}
+                    placeholder="iir20/ratul-cyber-deck"
+                    className="w-full text-[9px] bg-[#040406] border border-stone-800 rounded-sm p-2 text-white font-mono focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[8px] text-zinc-500 uppercase tracking-wider block font-mono">BRANCH COORDINATES</label>
+                  <input
+                    type="text"
+                    value={ghBranch}
+                    onChange={(e) => setGhBranch(e.target.value)}
+                    placeholder="main"
+                    className="w-full text-[9px] bg-[#040406] border border-stone-800 rounded-sm p-2 text-white font-mono focus:outline-none focus:border-emerald-500/50"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 pt-1 select-none">
+                <button
+                  type="button"
+                  onClick={handlePushToGitHub}
+                  className="cursor-pointer px-4 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 font-bold text-[9px] rounded-sm uppercase flex items-center gap-1.5 font-mono"
+                >
+                  <UploadCloud className="h-3.5 w-3.5" />
+                  <span>COMMIT DYNAMIC DATA TO REPOSITORY SOURCE</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handlePullFromGitHub}
+                  className="cursor-pointer px-4 py-2 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-400 font-bold text-[9px] rounded-sm uppercase flex items-center gap-1.5 font-mono"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>PULL LATEST METADATA SNAP FROM GITHUB</span>
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -1512,7 +1752,7 @@ interface DevOpsTabProps {
 }
 
 function DevOpsTab({ logActivity, accentColor, styles }: DevOpsTabProps) {
-  const [activeYml, setActiveYml] = useState<"deploy" | "firebase" | "security" | "lighthouse" | "release">("deploy");
+  const [activeYml, setActiveYml] = useState<"deploy" | "security" | "lighthouse" | "release">("deploy");
   const [terminalLogs, setTerminalLogs] = useState<string[]>([]);
   const [isCompiling, setIsCompiling] = useState(false);
 
@@ -1525,40 +1765,28 @@ function DevOpsTab({ logActivity, accentColor, styles }: DevOpsTabProps) {
     let logLines: string[] = [];
     if (activeYml === "deploy") {
       logLines = [
-        "🚀 [WORKFLOW TRIGGERED]: push event detected on branch 'main'",
+        "🚀 [WORKFLOW TRIGGERED]: push event detected on branch 'main' of iir20/ratul-cyber-deck",
         "📦 Checking out repository source commits... SUCCESS [sha: e28da9c2]",
-        "🧪 Running continuous integration checks & structural validation...",
-        "⚙️ Running lint checks (tsc --noEmit & eslint)... PASS",
-        "⚙️ Running automated cybersecurity security scan... NO VULNERABILITIES DETECTED",
-        "⚙️ Compiling production client bundle (esbuild + vite compile)...",
-        "⚡ Static assets compressed via gzip/Brotli rules (ratio 2.4:1)",
-        "✔️ Generated dynamic robots.txt and sitemap.xml SEO mapping",
-        "✔️ Validated Offline Progressive Web App (PWA) configurations",
-        "☁️ Pushing static assets build contents to Firebase Hosting...",
-        "🚀 Deployed to cloud-run server-side GCR coordinates successfully!",
-        "🎉 Global Edge CDN caches purge completed. NEW BUILD ONLINE DETECTED!"
-      ];
-    } else if (activeYml === "firebase") {
-      logLines = [
-        "🔥 [FIREBASE PIPELINE INITIALIZED]: manual trigger configuration check",
-        "🔐 Checking Firebase CLI configuration credentials...",
-        "📂 Validating static redirect routing configurations inside firebase.json...",
-        "✔️ Security Headers added: Content-Security-Policy (CSP), Strict-Transport-Security",
-        "✔️ Hosting indices parsed... 100% optimized",
-        "☁️ Streaming static files & Brotli vectors to Firebase Hosting Channels...",
-        "🚀 LIVE URL: https://im-ismail-ibne-ratul.web.app",
-        "🔒 Secure HTTPS channels enforced. CDN servers active globally."
+        "🧪 Aligning Node.js runtime environment dependencies v20... Completed",
+        "⚙️ Running lint checks & compilation audits (tsc --noEmit)... PASS",
+        "⚙️ Auditing Static Zero-Trust Bundle requirements... NO WARNINGS",
+        "⚙️ Compiling production client static bundle (vite compile)...",
+        "⚡ Code optimization active. Static resources compressed (gzip ratio 2.4:1)",
+        "✔️ Generated dynamic index.html and SEO sitemap.xml routing map",
+        "⚡ Pushing bundle files to GitHub Static Pages CDN channels...",
+        "🚀 LIVE DEPLOYMENT ON GITHUB: https://iir20.github.io/ completed!",
+        "🎉 Global Actions CDN cache purge triggered. NEW RUNTIME ENVIRONMENT ACTIVE!"
       ];
     } else if (activeYml === "security") {
       logLines = [
-        "🛡️ [SECURITY SCAN INITIATED]: zero-trust scanner v4.11",
-        "🔍 Parsing dependencies for known vulnerabilities...",
-        "⚠️ No vulnerability patches required for active packages.",
-        "🔍 Scanning credential secrets on all code segments...",
-        "✔️ Zero hardcoded keys or API credentials leaked. Perfect alignment.",
-        "🔍 Auditing Firebase Firestore rules constraints in firestore.rules...",
-        "✔️ Invariants certified: contacts, configurations, backups completely segmented.",
-        "🎉 Security audit score: 100% compliant. Safe production gateway confirmed."
+        "🛡️ [SECURITY SCAN INITIATED]: zero-trust static scanner v2.3",
+        "🔍 Parsing package dependencies for known SAST/Snyk disclosures...",
+        "✔️ No high-severity vulnerabilities detected in local node tree.",
+        "🔍 Scanning credential secrets on overall file paths...",
+        "✔️ Zero hardcoded keys or API credentials leaked. Perfect static alignment.",
+        "🔍 Checking password authentication hashes constraints...",
+        "✔️ Invariants certified: administrative login gated securely via SHA-256 local database.",
+        "🎉 Threat database scan completed: 100% secure configuration confirmed."
       ];
     } else if (activeYml === "lighthouse") {
       logLines = [
@@ -1567,7 +1795,7 @@ function DevOpsTab({ logActivity, accentColor, styles }: DevOpsTabProps) {
         "📊 Asserting results comparing with Nothing OS digital benchmarks:",
         "   - PERFORMANCE     : 98/100  (LCP: 0.8s, CLS: 0.01)",
         "   - ACCESSIBILITY   : 100/100 (Contrast and Screenreaders nominal)",
-        "   - BEST PRACTICES  : 100/100 (Secure sandboxes checked)",
+        "   - BEST PRACTICES  : 100/100 (Static browser sandbox active)",
         "   - SEO             : 100/100 (Sitemap and metadata synchronized)",
         "🎉 Overall Assertions completed. Excellent rating passed."
       ];
@@ -1654,8 +1882,7 @@ function DevOpsTab({ logActivity, accentColor, styles }: DevOpsTabProps) {
         {/* Workflow selection tabs */}
         <div className="flex flex-wrap gap-1 select-none">
           {[
-            { id: "deploy", label: "deploy.yml" },
-            { id: "firebase", label: "firebase-hosting.yml" },
+            { id: "deploy", label: "deploy.yml (pages)" },
             { id: "security", label: "security-scan.yml" },
             { id: "lighthouse", label: "lighthouse-audit.yml" },
             { id: "release", label: "release.yml" }
