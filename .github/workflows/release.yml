@@ -1,0 +1,17 @@
+name: Milestone tagging and Release packaging Engine
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  tag-rebuilds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Rebuild and package artifacts
+        run: |
+          echo "Packaging dynamic portfolio assets into immutable release coordinates"
+          zip -r ratul-portfolio-deploy.zip dist/

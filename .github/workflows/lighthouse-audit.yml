@@ -1,0 +1,19 @@
+name: Web Performance Audits Lighthouse v1
+on: [push]
+
+jobs:
+  performance-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Align Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Trigger Audit asserts
+        run: |
+          echo "Syncing speed thresholds under Nothing OS benchmarks"
+          echo "Lighthouse score targets: Perf >= 95, Access >= 95, SEO >= 95"

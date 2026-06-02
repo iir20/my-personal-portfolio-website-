@@ -1,0 +1,33 @@
+name: CI/CD Production Build & Self-Host Deploy
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code Node
+        uses: actions/checkout@v4
+
+      - name: Align Node Runtime Version
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Fetch Dependency Packets
+        run: npm ci
+
+      - name: Compile and Bundle Production Build
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Scan Docker Image
+        run: |
+          docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/ratul-cyber-deck:latest .

@@ -1,0 +1,6 @@
+{
+  "name": "Ismail Ibne Ratul Portfolio",
+  "description": "Futuristic cyberpunk personal portfolio website for Ismail Ibne Ratul, software developer and cybersecurity specialist.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
